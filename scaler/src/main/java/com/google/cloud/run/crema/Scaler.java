@@ -201,6 +201,7 @@ public class Scaler {
 
     boolean useGithubRunnerZeroOnlyScaleDown =
         zeroOnlyGithubRunnerWorkerPool && hasValidGithubRunnerTrigger;
+    int rawRecommendation = unboundedRecommendation;
     if (useGithubRunnerZeroOnlyScaleDown
         && unboundedRecommendation > 0
         && unboundedRecommendation < currentInstanceCount) {
@@ -242,6 +243,19 @@ public class Scaler {
             scalerConfig,
             now,
             workloadName);
+
+    if (useGithubRunnerZeroOnlyScaleDown
+        && rawRecommendation > 0
+        && newInstanceCount < currentInstanceCount) {
+      logger
+          .atInfo()
+          .with(RESOURCE, workloadName)
+          .log(
+              "Preserving %d instances for %s because bounding changed a nonzero GitHub runner"
+                  + " recommendation from %d to %d.",
+              currentInstanceCount, workloadName, rawRecommendation, newInstanceCount);
+      newInstanceCount = currentInstanceCount;
+    }
 
     logger.atInfo().with(RESOURCE, workloadName).with(RECOMMENDED_INSTANCE_COUNT, newInstanceCount)
     .log("Recommended instances for %s: %d", workloadName, newInstanceCount);

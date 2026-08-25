@@ -339,6 +339,44 @@ public final class ScalerTest {
   }
 
   @Test
+  public void scale_githubRunnerWorkerPoolPartialDecreaseClampedEnabled_keepsCurrentInstances()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    Advanced clampedAdvanced =
+        ADVANCED.toBuilder()
+            .setScalerConfig(ADVANCED.getScalerConfig().toBuilder().setMaxInstances(10))
+            .build();
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(clampedAdvanced)
+            .build();
+    Metric metric =
+        Metric.newBuilder()
+            .setValue(8)
+            .setTargetAverageValue(1)
+            .setTriggerType("github-runner")
+            .build();
+    ScaledObjectMetrics scaledObjectMetrics =
+        ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).addMetrics(metric).build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(15);
+
+    ScalingStatus status = scaler.scale(scaledObjectMetrics);
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
+  }
+
+  @Test
   public void scale_githubRunnerWorkerPoolZeroRecommendationEnabled_scalesToZero()
       throws IOException, ExecutionException, InterruptedException {
     Scaler scaler =
