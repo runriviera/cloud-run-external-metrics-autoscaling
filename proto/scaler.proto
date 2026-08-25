@@ -52,6 +52,10 @@ message ScaledObjectMetrics {
 
   // Metrics corresponding to the triggers specified in the ScaledObject.
   repeated Metric metrics = 2;
+
+  // Trigger types whose metric lookup failed during this collection cycle.
+  // This lets opt-in safety policies fail closed when another trigger succeeds.
+  repeated string failed_trigger_types = 3;
 }
 
 message Metric {

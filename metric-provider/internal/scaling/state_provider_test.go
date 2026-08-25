@@ -114,6 +114,7 @@ func TestStateProvider_GetScaledObjectState(t *testing.T) {
 		builders                []cache.ScalerBuilder
 		expectedIsActive        bool
 		expectedMetricAndTarget []MetricAndTargetValue
+		expectedFailedTriggers  []string
 		expectedError           bool
 	}{
 		{
@@ -170,6 +171,7 @@ func TestStateProvider_GetScaledObjectState(t *testing.T) {
 			},
 			expectedIsActive:        false,
 			expectedMetricAndTarget: []MetricAndTargetValue{},
+			expectedFailedTriggers:  []string{"type1"},
 			expectedError:           true,
 		},
 		{
@@ -231,7 +233,35 @@ func TestStateProvider_GetScaledObjectState(t *testing.T) {
 					},
 				},
 			},
-			expectedError: false},
+			expectedFailedTriggers: []string{"type2"},
+			expectedError:          false},
+		{
+			name: "multiple scalers, one without metrics",
+			builders: []cache.ScalerBuilder{
+				{
+					Scaler:       &mockScaler{isActive: true, metrics: []external_metrics.ExternalMetricValue{metric1}},
+					ScalerConfig: scalersconfig.ScalerConfig{TriggerName: "trigger1", TriggerIndex: 0},
+				},
+				{
+					Scaler:       &mockScaler{},
+					ScalerConfig: scalersconfig.ScalerConfig{TriggerIndex: 1},
+				},
+			},
+			expectedIsActive: true,
+			expectedMetricAndTarget: []MetricAndTargetValue{
+				{
+					TriggerName: "trigger1",
+					TriggerType: "type1",
+					MetricValue: float64(metric1.Value.Value()),
+					TargetValue: v2.MetricTarget{
+						Type:         v2.AverageValueMetricType,
+						AverageValue: resource.NewQuantity(10, resource.DecimalSI),
+					},
+				},
+			},
+			expectedFailedTriggers: []string{"type2"},
+			expectedError:          false,
+		},
 		{
 			name: "multiple scalers, all inactive",
 			builders: []cache.ScalerBuilder{
@@ -281,6 +311,7 @@ func TestStateProvider_GetScaledObjectState(t *testing.T) {
 			},
 			expectedIsActive:        false,
 			expectedMetricAndTarget: []MetricAndTargetValue{},
+			expectedFailedTriggers:  []string{"type1", "type2"},
 			expectedError:           true,
 		},
 	}
@@ -292,6 +323,7 @@ func TestStateProvider_GetScaledObjectState(t *testing.T) {
 
 			assert.Equal(t, tc.expectedIsActive, state.IsActive)
 			assert.ElementsMatch(t, tc.expectedMetricAndTarget, state.MetricAndTargetValues)
+			assert.ElementsMatch(t, tc.expectedFailedTriggers, state.FailedTriggerTypes)
 
 			if tc.expectedError {
 				assert.Error(t, err)

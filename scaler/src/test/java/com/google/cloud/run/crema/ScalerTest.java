@@ -31,8 +31,11 @@ import static org.mockito.Mockito.when;
 
 import com.google.cloud.run.crema.clients.CloudRunClientWrapper;
 import java.io.IOException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.concurrent.ExecutionException;
 import org.junit.Before;
 import org.junit.Test;
@@ -41,6 +44,33 @@ import org.junit.runners.JUnit4;
 
 @RunWith(JUnit4.class)
 public final class ScalerTest {
+
+  private static final class MutableClock extends Clock {
+    private Instant current;
+
+    MutableClock(Instant current) {
+      this.current = current;
+    }
+
+    void advance(Duration duration) {
+      current = current.plus(duration);
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return Clock.fixed(current, zone);
+    }
+
+    @Override
+    public Instant instant() {
+      return current;
+    }
+  }
 
   private CloudRunClientWrapper cloudRunClientWrapper;
   private MetricsService metricsService;
@@ -83,6 +113,22 @@ public final class ScalerTest {
                           .setScaleDown(
                               Advanced.ScalerConfig.Behavior.Scaling.newBuilder()
                                   .setStabilizationWindowSeconds(0))))
+          .build();
+
+  private static final Advanced ADVANCED_WITH_SCALE_DOWN_STABILIZATION =
+      Advanced.newBuilder()
+          .setScalerConfig(
+              Advanced.ScalerConfig.newBuilder()
+                  .setMinInstances(0)
+                  .setMaxInstances(100)
+                  .setBehavior(
+                      Advanced.ScalerConfig.Behavior.newBuilder()
+                          .setScaleUp(
+                              Advanced.ScalerConfig.Behavior.Scaling.newBuilder()
+                                  .setStabilizationWindowSeconds(0))
+                          .setScaleDown(
+                              Advanced.ScalerConfig.Behavior.Scaling.newBuilder()
+                                  .setStabilizationWindowSeconds(180))))
           .build();
 
   @Before
@@ -418,6 +464,139 @@ public final class ScalerTest {
             ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).build());
 
     assertThat(status).isEqualTo(ScalingStatus.FAILED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
+  }
+
+  @Test
+  public void scale_firstZeroRecommendationEnabled_waitsForStabilizationWindow()
+      throws IOException, ExecutionException, InterruptedException {
+    MutableClock clock = new MutableClock(Instant.parse("2026-08-25T00:00:00Z"));
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project",
+            clock);
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(ADVANCED_WITH_SCALE_DOWN_STABILIZATION)
+            .build();
+    ScaledObjectMetrics metrics =
+        ScaledObjectMetrics.newBuilder()
+            .setScaledObject(scaledObject)
+            .addMetrics(
+                Metric.newBuilder()
+                    .setValue(0)
+                    .setTargetAverageValue(1)
+                    .setTriggerType("github-runner")
+                    .build())
+            .build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(15);
+
+    assertThat(scaler.scale(metrics)).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+
+    clock.advance(Duration.ofSeconds(180));
+    assertThat(scaler.scale(metrics)).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_zeroAfterScaleFromZeroEnabled_waitsForStabilizationWindow()
+      throws IOException, ExecutionException, InterruptedException {
+    MutableClock clock = new MutableClock(Instant.parse("2026-08-25T00:00:00Z"));
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project",
+            clock);
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(ADVANCED_WITH_SCALE_DOWN_STABILIZATION)
+            .build();
+    ScaledObjectMetrics activeMetrics =
+        ScaledObjectMetrics.newBuilder()
+            .setScaledObject(scaledObject)
+            .addMetrics(
+                Metric.newBuilder()
+                    .setValue(10)
+                    .setTargetAverageValue(1)
+                    .setTriggerType("github-runner")
+                    .build())
+            .build();
+    ScaledObjectMetrics zeroMetrics =
+        activeMetrics
+            .toBuilder()
+            .clearMetrics()
+            .addMetrics(
+                Metric.newBuilder()
+                    .setValue(0)
+                    .setTargetAverageValue(1)
+                    .setTriggerType("github-runner")
+                    .build())
+            .build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(0, 1, 1);
+
+    assertThat(scaler.scale(activeMetrics)).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 1, "test-project", "test-location");
+
+    clock.advance(Duration.ofSeconds(30));
+    assertThat(scaler.scale(zeroMetrics)).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+
+    clock.advance(Duration.ofSeconds(150));
+    assertThat(scaler.scale(zeroMetrics)).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_failedGithubTriggerWithOtherMetricEnabled_doesNotScaleDown()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(ADVANCED)
+            .build();
+    ScaledObjectMetrics metrics =
+        ScaledObjectMetrics.newBuilder()
+            .setScaledObject(scaledObject)
+            .addFailedTriggerTypes("github-runner")
+            .addMetrics(
+                Metric.newBuilder()
+                    .setValue(8)
+                    .setTargetAverageValue(1)
+                    .setTriggerType("prometheus")
+                    .build())
+            .build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(15);
+
+    assertThat(scaler.scale(metrics)).isEqualTo(ScalingStatus.FAILED);
     verify(cloudRunClientWrapper, never())
         .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
   }
