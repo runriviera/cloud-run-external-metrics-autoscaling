@@ -100,8 +100,18 @@ public class Scaler {
 
     int unboundedRecommendation = 0;
     boolean hasValidTrigger = false;
+    boolean hasGithubRunnerTrigger = false;
 
     if (scaledObjectMetrics.getMetricsCount() == 0) {
+      if (staticConfig.githubRunnerZeroOnlyScaleDown()
+          && workloadInfo.workloadType() == WorkloadInfoParser.WorkloadType.WORKERPOOL) {
+        logger.atWarning().with(RESOURCE, workloadName)
+        .log(
+            "No metrics configured for %s; preserving the worker pool because GitHub runner"
+                + " zero-only scale-down is enabled.",
+            workloadName);
+        return ScalingStatus.FAILED;
+      }
       logger.atInfo().with(RESOURCE, workloadName)
       .log("No metrics configured for %s, scaling down to 0", workloadName);
       updateInstanceCount(0, workloadInfo);
@@ -135,12 +145,26 @@ public class Scaler {
 
       unboundedRecommendation = max(unboundedRecommendation, recommendation);
       hasValidTrigger = true;
+      hasGithubRunnerTrigger |= metric.getTriggerType().equals("github-runner");
     }
 
     if (!hasValidTrigger) {
       logger.atWarning().log(
           "No valid triggers found for %s. Skipping scaling workload.", workloadName);
       return ScalingStatus.FAILED;
+    }
+
+    if (staticConfig.githubRunnerZeroOnlyScaleDown()
+        && workloadInfo.workloadType() == WorkloadInfoParser.WorkloadType.WORKERPOOL
+        && hasGithubRunnerTrigger
+        && unboundedRecommendation > 0
+        && unboundedRecommendation < currentInstanceCount) {
+      logger.atInfo().with(RESOURCE, workloadName)
+      .log(
+          "Preserving %d instances for %s because GitHub runner zero-only scale-down is enabled;"
+              + " the recommendation was %d.",
+          currentInstanceCount, workloadName, unboundedRecommendation);
+      unboundedRecommendation = currentInstanceCount;
     }
 
     Advanced.ScalerConfig scalerConfig =

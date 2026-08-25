@@ -129,6 +129,30 @@ public final class ConfigurationProviderTest {
   }
 
   @Test
+  public void staticConfig_withoutGithubRunnerZeroOnlyScaleDownFlag_returnsFalse()
+      throws IOException {
+    ConfigurationProvider configuration =
+        new ConfigurationProvider(new FakeEnvProvider(ImmutableMap.of()));
+
+    ConfigurationProvider.StaticConfig staticConfig = configuration.staticConfig();
+
+    assertThat(staticConfig.githubRunnerZeroOnlyScaleDown()).isFalse();
+  }
+
+  @Test
+  public void staticConfig_withGithubRunnerZeroOnlyScaleDownFlag_returnsTrue()
+      throws IOException {
+    ConfigurationProvider configuration =
+        new ConfigurationProvider(
+            new FakeEnvProvider(
+                ImmutableMap.of("GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN", "TRUe")));
+
+    ConfigurationProvider.StaticConfig staticConfig = configuration.staticConfig();
+
+    assertThat(staticConfig.githubRunnerZeroOnlyScaleDown()).isTrue();
+  }
+
+  @Test
   public void kafkaClientProperties_missingFile_throwsFileNotFoundException() {
     ConfigurationProvider configuration =
         new ConfigurationProvider(new FakeEnvProvider(ImmutableMap.of()));
