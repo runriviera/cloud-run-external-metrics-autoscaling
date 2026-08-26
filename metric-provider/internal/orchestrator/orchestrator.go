@@ -16,6 +16,7 @@ package orchestrator
 
 import (
 	"context"
+	"sync"
 
 	"crema/metric-provider/api"
 	"crema/metric-provider/internal/scaling"
@@ -39,13 +40,20 @@ type StateProvider interface {
 	GetScaledObjectState(ctx context.Context, scaledObject *kedav1alpha1.ScaledObject, scalerBuilders []cache.ScalerBuilder) (scaling.ScaledObjectState, error)
 }
 
+type cachedBuilders struct {
+	scaleTargetName string
+	builders        []cache.ScalerBuilder
+}
+
 // The orchestrator is responsible for retrieving configuration, using it to fetch metrics, and sending the metrics to the scaling system.
 type Orchestrator struct {
-	scalerClient   ScalerClient
-	cremaConfig    *api.CremaConfig
-	builderFactory BuilderFactory
-	stateProvider  StateProvider
-	logger         *logr.Logger
+	scalerClient           ScalerClient
+	cremaConfig            *api.CremaConfig
+	builderFactory         BuilderFactory
+	stateProvider          StateProvider
+	logger                 *logr.Logger
+	refreshMu              sync.Mutex
+	buildersByScaledObject map[int]cachedBuilders
 }
 
 // Create a new Orchestrator. The zero value is not usable.
@@ -57,16 +65,20 @@ func New(
 	logger *logr.Logger,
 ) *Orchestrator {
 	return &Orchestrator{
-		scalerClient:   scalerClient,
-		cremaConfig:    cremaConfig,
-		builderFactory: builderFactory,
-		stateProvider:  stateProvider,
-		logger:         logger,
+		scalerClient:           scalerClient,
+		cremaConfig:            cremaConfig,
+		builderFactory:         builderFactory,
+		stateProvider:          stateProvider,
+		logger:                 logger,
+		buildersByScaledObject: make(map[int]cachedBuilders),
 	}
 }
 
 // RefreshMetrics fetches metrics for all scaled objects and sends them in a single request to Scaler
 func (o *Orchestrator) RefreshMetrics(ctx context.Context) error {
+	o.refreshMu.Lock()
+	defer o.refreshMu.Unlock()
+
 	o.logger.Info("Starting metric collection cycle")
 
 	kedaScaledObjects := scaling.ToKedaScaledObjects(o.cremaConfig)
@@ -74,8 +86,13 @@ func (o *Orchestrator) RefreshMetrics(ctx context.Context) error {
 
 	var scaledObjectMetrics []*pb.ScaledObjectMetrics
 
-	for _, kedaScaledObject := range kedaScaledObjects {
-		metrics, err := o.refreshMetricsForScaledObject(ctx, &kedaScaledObject, triggerAuthentications)
+	for scaledObjectIndex := range kedaScaledObjects {
+		metrics, err := o.refreshMetricsForScaledObject(
+			ctx,
+			scaledObjectIndex,
+			&kedaScaledObjects[scaledObjectIndex],
+			triggerAuthentications,
+		)
 		if err != nil {
 			continue
 		}
@@ -101,17 +118,17 @@ func (o *Orchestrator) RefreshMetrics(ctx context.Context) error {
 
 func (o *Orchestrator) refreshMetricsForScaledObject(
 	ctx context.Context,
+	scaledObjectIndex int,
 	kedaScaledObject *kedav1alpha1.ScaledObject,
 	triggerAuthentications []api.TriggerAuthentication,
 ) (*pb.ScaledObjectMetrics, error) {
 	logger := o.logger.WithValues("scaleTargetName", kedaScaledObject.Spec.ScaleTargetRef.Name)
-	builders, err := o.builderFactory.MakeBuilders(ctx, kedaScaledObject, triggerAuthentications /*asMetricSource=*/, true)
+	builders, err := o.getOrMakeBuilders(ctx, scaledObjectIndex, kedaScaledObject, triggerAuthentications)
 
 	if err != nil {
 		logger.Error(err, "Unable to refresh metrics")
 		return nil, err
 	}
-	defer closeScalers(ctx, logger, builders)
 
 	scaledObjectState, err := o.stateProvider.GetScaledObjectState(ctx, kedaScaledObject, builders)
 	if err != nil {
@@ -124,6 +141,44 @@ func (o *Orchestrator) refreshMetricsForScaledObject(
 		Metrics:            toMetrics(scaledObjectState),
 		FailedTriggerTypes: scaledObjectState.FailedTriggerTypes,
 	}, nil
+}
+
+func (o *Orchestrator) getOrMakeBuilders(
+	ctx context.Context,
+	scaledObjectIndex int,
+	kedaScaledObject *kedav1alpha1.ScaledObject,
+	triggerAuthentications []api.TriggerAuthentication,
+) ([]cache.ScalerBuilder, error) {
+	if cached, ok := o.buildersByScaledObject[scaledObjectIndex]; ok {
+		return cached.builders, nil
+	}
+
+	builders, err := o.builderFactory.MakeBuilders(
+		ctx,
+		kedaScaledObject,
+		triggerAuthentications,
+		/*asMetricSource=*/ true,
+	)
+	if err != nil {
+		return nil, err
+	}
+	o.buildersByScaledObject[scaledObjectIndex] = cachedBuilders{
+		scaleTargetName: kedaScaledObject.Spec.ScaleTargetRef.Name,
+		builders:        builders,
+	}
+	return builders, nil
+}
+
+// Close releases the long-lived scaler instances retained between polling cycles.
+func (o *Orchestrator) Close(ctx context.Context) {
+	o.refreshMu.Lock()
+	defer o.refreshMu.Unlock()
+
+	for _, cached := range o.buildersByScaledObject {
+		logger := o.logger.WithValues("scaleTargetName", cached.scaleTargetName)
+		closeScalers(ctx, logger, cached.builders)
+	}
+	o.buildersByScaledObject = make(map[int]cachedBuilders)
 }
 
 func toMetrics(scaledObjectState scaling.ScaledObjectState) []*pb.Metric {

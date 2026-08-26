@@ -402,7 +402,7 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 		mockScalerClient.AssertExpectations(t)
 	})
 
-	t.Run("should close all generated scalers upon cycle completion", func(t *testing.T) {
+	t.Run("should reuse generated scalers and close them on shutdown", func(t *testing.T) {
 		mockScalerClient := new(MockScalerServerClient)
 		mockBuilderFactory := new(MockBuilderFactory)
 		mockStateProvider := new(MockStateProvider)
@@ -422,6 +422,18 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 							},
 						},
 					},
+					{
+						Spec: kedav1alpha1.ScaledObjectSpec{
+							ScaleTargetRef: &kedav1alpha1.ScaleTarget{
+								Name: "my-workerpool",
+							},
+							Triggers: []kedav1alpha1.ScaleTriggers{
+								{
+									Type: "bar",
+								},
+							},
+						},
+					},
 				},
 			},
 		}
@@ -434,13 +446,20 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 			&logger,
 		)
 
-		mockScaler := new(MockLifecycleScaler)
-		builders := []cache.ScalerBuilder{
+		mockScalerOne := new(MockLifecycleScaler)
+		buildersOne := []cache.ScalerBuilder{
 			{
-				Scaler: mockScaler,
+				Scaler: mockScalerOne,
 			},
 		}
-		mockBuilderFactory.On("MakeBuilders", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(builders, nil)
+		mockScalerTwo := new(MockLifecycleScaler)
+		buildersTwo := []cache.ScalerBuilder{
+			{
+				Scaler: mockScalerTwo,
+			},
+		}
+		mockBuilderFactory.On("MakeBuilders", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(buildersOne, nil).Once()
+		mockBuilderFactory.On("MakeBuilders", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(buildersTwo, nil).Once()
 
 		scaledObjectState := &scaling.ScaledObjectState{
 			MetricAndTargetValues: []scaling.MetricAndTargetValue{
@@ -458,11 +477,18 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 		mockStateProvider.On("GetScaledObjectState", mock.Anything, mock.Anything, mock.Anything).Return(*scaledObjectState, nil)
 
 		mockScalerClient.On("Scale", mock.Anything, mock.Anything).Return(&pb.ScaleResponse{}, nil)
-		mockScaler.On("Close", mock.Anything).Return(nil)
+		mockScalerOne.On("Close", mock.Anything).Return(nil)
+		mockScalerTwo.On("Close", mock.Anything).Return(nil)
 
 		_ = orchestrator.RefreshMetrics(context.Background())
+		_ = orchestrator.RefreshMetrics(context.Background())
 
-		mockScaler.AssertExpectations(t)
+		mockBuilderFactory.AssertNumberOfCalls(t, "MakeBuilders", 2)
+		mockScalerOne.AssertNotCalled(t, "Close", mock.Anything)
+		mockScalerTwo.AssertNotCalled(t, "Close", mock.Anything)
+		orchestrator.Close(context.Background())
+		mockScalerOne.AssertExpectations(t)
+		mockScalerTwo.AssertExpectations(t)
 	})
 }
 
