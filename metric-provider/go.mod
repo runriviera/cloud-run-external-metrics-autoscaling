@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/secretmanager v1.20.0
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
-	github.com/kedacore/keda/v2 v2.20.0
+	github.com/kedacore/keda/v2 v2.20.2
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/api v0.281.0
 	google.golang.org/grpc v1.81.1
@@ -18,6 +18,8 @@ require (
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/yaml v1.6.0
 )
+
+replace github.com/kedacore/keda/v2 => github.com/runriviera/keda/v2 v2.20.3-0.20260826192456-b75a4b96c370
 
 require (
 	cel.dev/expr v0.25.1 // indirect
