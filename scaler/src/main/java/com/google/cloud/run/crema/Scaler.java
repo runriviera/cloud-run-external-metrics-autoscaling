@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.flogger.FluentLogger;
 import com.google.common.flogger.MetadataKey;
 import java.io.IOException;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -57,18 +58,29 @@ public class Scaler {
   private final MetricsService metricsService;
   private final ConfigurationProvider.StaticConfig staticConfig;
   private final String projectId;
+  private final Clock clock;
 
   public Scaler(
       CloudRunClientWrapper cloudRunClientWrapper,
       MetricsService metricsService,
       ConfigurationProvider.StaticConfig config,
       String projectId) {
+    this(cloudRunClientWrapper, metricsService, config, projectId, Clock.systemUTC());
+  }
+
+  Scaler(
+      CloudRunClientWrapper cloudRunClientWrapper,
+      MetricsService metricsService,
+      ConfigurationProvider.StaticConfig config,
+      String projectId,
+      Clock clock) {
     this.cloudRunClientWrapper =
         Preconditions.checkNotNull(cloudRunClientWrapper, "Cloud Run client cannot be null.");
     this.metricsService =
         Preconditions.checkNotNull(metricsService, "Metrics service cannot be null.");
     this.staticConfig = Preconditions.checkNotNull(config, "Static config cannot be null.");
     this.projectId = Preconditions.checkNotNull(projectId, "Project ID cannot be null.");
+    this.clock = Preconditions.checkNotNull(clock, "Clock cannot be null.");
   }
 
   /**
@@ -82,7 +94,7 @@ public class Scaler {
    */
   public ScalingStatus scale(ScaledObjectMetrics scaledObjectMetrics)
       throws IOException, ExecutionException, InterruptedException {
-    Instant now = Instant.now();
+    Instant now = clock.instant();
 
     String workloadName = scaledObjectMetrics.getScaledObject().getScaleTargetRef().getName();
     final WorkloadInfoParser.WorkloadInfo workloadInfo = WorkloadInfoParser.parse(workloadName);
@@ -93,6 +105,22 @@ public class Scaler {
           "USE_MIN_INSTANCES is not supported for worker pool workloads.");
     }
 
+    boolean zeroOnlyGithubRunnerWorkerPool =
+        staticConfig.githubRunnerZeroOnlyScaleDown()
+            && workloadInfo.workloadType() == WorkloadInfoParser.WorkloadType.WORKERPOOL;
+
+    if (zeroOnlyGithubRunnerWorkerPool
+        && scaledObjectMetrics.getFailedTriggerTypesList().contains("github-runner")) {
+      logger
+          .atWarning()
+          .with(RESOURCE, workloadName)
+          .log(
+              "GitHub runner metrics failed for %s; preserving the worker pool because zero-only"
+                  + " scale-down is enabled.",
+              workloadName);
+      return ScalingStatus.FAILED;
+    }
+
     int currentInstanceCount =
         InstanceCountProvider.getInstanceCount(cloudRunClientWrapper, workloadInfo);
     logger.atInfo().with(RESOURCE, workloadName).with(CURRENT_INSTANCE_COUNT, currentInstanceCount)
@@ -100,8 +128,20 @@ public class Scaler {
 
     int unboundedRecommendation = 0;
     boolean hasValidTrigger = false;
+    boolean hasGithubRunnerMetric = false;
+    boolean hasValidGithubRunnerTrigger = false;
 
     if (scaledObjectMetrics.getMetricsCount() == 0) {
+      if (zeroOnlyGithubRunnerWorkerPool) {
+        logger
+            .atWarning()
+            .with(RESOURCE, workloadName)
+            .log(
+                "No metrics configured for %s; preserving the worker pool because GitHub runner"
+                    + " zero-only scale-down is enabled.",
+                workloadName);
+        return ScalingStatus.FAILED;
+      }
       logger.atInfo().with(RESOURCE, workloadName)
       .log("No metrics configured for %s, scaling down to 0", workloadName);
       updateInstanceCount(0, workloadInfo);
@@ -109,6 +149,8 @@ public class Scaler {
     }
 
     for (Metric metric : scaledObjectMetrics.getMetricsList()) {
+      boolean isGithubRunnerTrigger = metric.getTriggerType().equals("github-runner");
+      hasGithubRunnerMetric |= isGithubRunnerTrigger;
       int recommendation;
       if (metric.hasTargetAverageValue() && metric.getTargetAverageValue() > 0) {
         recommendation =
@@ -135,6 +177,7 @@ public class Scaler {
 
       unboundedRecommendation = max(unboundedRecommendation, recommendation);
       hasValidTrigger = true;
+      hasValidGithubRunnerTrigger |= isGithubRunnerTrigger;
     }
 
     if (!hasValidTrigger) {
@@ -143,12 +186,54 @@ public class Scaler {
       return ScalingStatus.FAILED;
     }
 
+    if (zeroOnlyGithubRunnerWorkerPool
+        && hasGithubRunnerMetric
+        && !hasValidGithubRunnerTrigger) {
+      logger
+          .atWarning()
+          .with(RESOURCE, workloadName)
+          .log(
+              "No valid GitHub runner metric found for %s; preserving the worker pool because"
+                  + " zero-only scale-down is enabled.",
+              workloadName);
+      return ScalingStatus.FAILED;
+    }
+
+    boolean useGithubRunnerZeroOnlyScaleDown =
+        zeroOnlyGithubRunnerWorkerPool && hasValidGithubRunnerTrigger;
+    int rawRecommendation = unboundedRecommendation;
+    if (useGithubRunnerZeroOnlyScaleDown
+        && unboundedRecommendation > 0
+        && unboundedRecommendation < currentInstanceCount) {
+      logger
+          .atInfo()
+          .with(RESOURCE, workloadName)
+          .log(
+              "Preserving %d instances for %s because GitHub runner zero-only scale-down is"
+                  + " enabled; the recommendation was %d.",
+              currentInstanceCount, workloadName, unboundedRecommendation);
+      unboundedRecommendation = currentInstanceCount;
+    }
+
     Advanced.ScalerConfig scalerConfig =
         scaledObjectMetrics.getScaledObject().getAdvanced().getScalerConfig();
 
     ScalingStabilizer scalingStabilizer =
         scalingStabilizers.computeIfAbsent(
-            workloadInfo.name(), (String k) -> new ScalingStabilizer(currentInstanceCount));
+            workloadInfo.name(),
+            (String k) ->
+                useGithubRunnerZeroOnlyScaleDown
+                    ? new ScalingStabilizer(currentInstanceCount, now)
+                    : new ScalingStabilizer(currentInstanceCount));
+
+    if (useGithubRunnerZeroOnlyScaleDown
+        && currentInstanceCount == 0
+        && unboundedRecommendation > 0) {
+      // Upstream's 0->1 fast path returns before recording a recommendation.
+      // Seed it explicitly so a transient zero on the next cycle cannot drain
+      // the runner before the scale-down stabilization window elapses.
+      scalingStabilizer.recordRecommendation(now, unboundedRecommendation);
+    }
 
     int newInstanceCount =
         getBoundedRecommendation(
@@ -158,6 +243,19 @@ public class Scaler {
             scalerConfig,
             now,
             workloadName);
+
+    if (useGithubRunnerZeroOnlyScaleDown
+        && rawRecommendation > 0
+        && newInstanceCount < currentInstanceCount) {
+      logger
+          .atInfo()
+          .with(RESOURCE, workloadName)
+          .log(
+              "Preserving %d instances for %s because bounding changed a nonzero GitHub runner"
+                  + " recommendation from %d to %d.",
+              currentInstanceCount, workloadName, rawRecommendation, newInstanceCount);
+      newInstanceCount = currentInstanceCount;
+    }
 
     logger.atInfo().with(RESOURCE, workloadName).with(RECOMMENDED_INSTANCE_COUNT, newInstanceCount)
     .log("Recommended instances for %s: %d", workloadName, newInstanceCount);

@@ -98,10 +98,14 @@ public class ScalingStabilizer {
   private final Deque<DataPoint> recommendations = new ArrayDeque<>();
 
   public ScalingStabilizer(int currentInstanceCount) {
-    recordInitialRecommendation(Instant.now(), currentInstanceCount);
+    this(currentInstanceCount, Instant.now());
   }
 
-  private void recordInitialRecommendation(Instant time, int recommendedInstances) {
+  ScalingStabilizer(int currentInstanceCount, Instant initialTime) {
+    recordRecommendation(initialTime, currentInstanceCount);
+  }
+
+  void recordRecommendation(Instant time, int recommendedInstances) {
     recommendations.add(new DataPoint(time, recommendedInstances));
   }
 
@@ -195,7 +199,7 @@ public class ScalingStabilizer {
     }
 
     // Always record the recommendation, even if it's unchanged.
-    recommendations.add(new DataPoint(time, recommendedInstances));
+    recordRecommendation(time, recommendedInstances);
 
     if (recommendedInstances > currentInstanceCount) {
       logger.atInfo().log(

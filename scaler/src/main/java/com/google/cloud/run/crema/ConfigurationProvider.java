@@ -53,6 +53,7 @@ class ConfigurationProvider {
 
   private static final boolean OUTPUT_SCALER_METRICS_DEFAULT = false;
   private static final boolean USE_MIN_INSTANCES_DEFAULT = false;
+  private static final boolean GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN_DEFAULT = false;
 
   // A cycle time greater than or equal to this will be ignored.
   public static final Duration MAX_CYCLE_DURATION = Duration.ofMinutes(1);
@@ -65,7 +66,10 @@ class ConfigurationProvider {
    * Static configuration for Kafka Scaler. These fields should only be read at startup, and should
    * not be changed during the lifetime of the application.
    */
-  public record StaticConfig(boolean useMinInstances, boolean outputScalerMetrics) {}
+  public record StaticConfig(
+      boolean useMinInstances,
+      boolean outputScalerMetrics,
+      boolean githubRunnerZeroOnlyScaleDown) {}
 
   /** Configuration for self-scheduling. */
   public record SchedulingConfig(
@@ -133,7 +137,14 @@ class ConfigurationProvider {
       outputScalerMetrics = Boolean.parseBoolean(envProvider.getEnv("OUTPUT_SCALER_METRICS"));
     }
 
-    return new StaticConfig(useMinInstances, outputScalerMetrics);
+    boolean githubRunnerZeroOnlyScaleDown = GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN_DEFAULT;
+    if (!isNullOrEmpty(envProvider.getEnv("GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN"))) {
+      githubRunnerZeroOnlyScaleDown =
+          Boolean.parseBoolean(envProvider.getEnv("GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN"));
+    }
+
+    return new StaticConfig(
+        useMinInstances, outputScalerMetrics, githubRunnerZeroOnlyScaleDown);
   }
 
   /**

@@ -120,8 +120,9 @@ func (o *Orchestrator) refreshMetricsForScaledObject(
 	}
 
 	return &pb.ScaledObjectMetrics{
-		ScaledObject: scaling.ToPbScaledObject(kedaScaledObject.Spec),
-		Metrics:      toMetrics(scaledObjectState),
+		ScaledObject:       scaling.ToPbScaledObject(kedaScaledObject.Spec),
+		Metrics:            toMetrics(scaledObjectState),
+		FailedTriggerTypes: scaledObjectState.FailedTriggerTypes,
 	}, nil
 }
 
@@ -150,4 +151,3 @@ func closeScalers(ctx context.Context, logger logr.Logger, builders []cache.Scal
 		}
 	}
 }
-

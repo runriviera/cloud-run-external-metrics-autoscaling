@@ -114,6 +114,7 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 		mockBuilderFactory.On("MakeBuilders", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(builders, nil)
 
 		scaledObjectState := &scaling.ScaledObjectState{
+			FailedTriggerTypes: []string{"github-runner"},
 			MetricAndTargetValues: []scaling.MetricAndTargetValue{
 				{
 					MetricValue: metricValue,
@@ -131,6 +132,7 @@ func TestOrchestrator_RefreshMetrics(t *testing.T) {
 		expectedScaleRequest := &pb.ScaleRequest{
 			ScaledObjectMetrics: []*pb.ScaledObjectMetrics{
 				{
+					FailedTriggerTypes: []string{"github-runner"},
 					ScaledObject: &pb.ScaledObject{
 						ScaleTargetRef: &pb.ScaleTargetRef{
 							Name: scaleTargetRefName,
@@ -482,4 +484,3 @@ func (m *MockLifecycleScaler) Close(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
-
