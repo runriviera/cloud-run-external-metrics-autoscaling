@@ -26,6 +26,7 @@ import (
 
 type mockOrchestrator struct {
 	refreshMetricsCalled chan bool
+	closeCalled          chan bool
 }
 
 func (m *mockOrchestrator) RefreshMetrics(ctx context.Context) error {
@@ -33,9 +34,14 @@ func (m *mockOrchestrator) RefreshMetrics(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockOrchestrator) Close(context.Context) {
+	m.closeCalled <- true
+}
+
 func newMockOrchestrator() *mockOrchestrator {
 	return &mockOrchestrator{
 		refreshMetricsCalled: make(chan bool, 1),
+		closeCalled:          make(chan bool, 1),
 	}
 }
 
@@ -137,5 +143,13 @@ func TestRefreshMetricsPolling(t *testing.T) {
 		// success
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for RefreshMetrics to be called")
+	}
+
+	cancel()
+	select {
+	case <-orchestrator.closeCalled:
+		// success
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for orchestrator to close")
 	}
 }

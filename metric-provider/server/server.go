@@ -43,6 +43,7 @@ const (
 
 type Orchestrator interface {
 	RefreshMetrics(ctx context.Context) error
+	Close(ctx context.Context)
 }
 
 type ScalerServerClient interface {
@@ -131,6 +132,7 @@ func New(logger *logr.Logger) (*Server, error) {
 // Start goroutines for the http server and metric polling (if configured)
 func (s *Server) Start(ctx context.Context) error {
 	defer s.scalerServerClient.Close()
+	defer s.scalingOrchestrator.Close(context.Background())
 
 	var wg sync.WaitGroup
 
