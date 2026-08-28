@@ -20,7 +20,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 )
 
-replace github.com/kedacore/keda/v2 => github.com/runriviera/keda/v2 v2.20.3-0.20260826192456-b75a4b96c370
+replace github.com/kedacore/keda/v2 => github.com/runriviera/keda/v2 v2.20.3-0.20260828164554-7caa9c4aa944
 
 require (
 	cel.dev/expr v0.25.1 // indirect
