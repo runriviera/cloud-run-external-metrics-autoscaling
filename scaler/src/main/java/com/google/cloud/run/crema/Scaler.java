@@ -59,10 +59,14 @@ public class Scaler {
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
 
   private static final MetadataKey<String> RESOURCE = MetadataKey.single("resource", String.class);
-  private static final MetadataKey<Integer> CURRENT_INSTANCE_COUNT = MetadataKey.single("currentInstanceCount", Integer.class);
-  private static final MetadataKey<Integer> RECOMMENDED_INSTANCE_COUNT = MetadataKey.single("recommendedInstanceCount", Integer.class);
-  private static final MetadataKey<Integer> MIN_REPLICA_COUNT = MetadataKey.single("minReplicaCount", Integer.class);
-  private static final MetadataKey<Integer> MAX_REPLICA_COUNT = MetadataKey.single("maxReplicaCount", Integer.class);
+  private static final MetadataKey<Integer> CURRENT_INSTANCE_COUNT =
+      MetadataKey.single("currentInstanceCount", Integer.class);
+  private static final MetadataKey<Integer> RECOMMENDED_INSTANCE_COUNT =
+      MetadataKey.single("recommendedInstanceCount", Integer.class);
+  private static final MetadataKey<Integer> MIN_REPLICA_COUNT =
+      MetadataKey.single("minReplicaCount", Integer.class);
+  private static final MetadataKey<Integer> MAX_REPLICA_COUNT =
+      MetadataKey.single("maxReplicaCount", Integer.class);
 
   private static final String RECOMMENDED_INSTANCE_COUNT_METRIC_NAME = "recommended_instance_count";
   private static final String REQUESTED_INSTANCE_COUNT_METRIC_NAME = "requested_instance_count";
@@ -140,8 +144,11 @@ public class Scaler {
 
     int currentInstanceCount =
         InstanceCountProvider.getInstanceCount(cloudRunClientWrapper, workloadInfo);
-    logger.atInfo().with(RESOURCE, workloadName).with(CURRENT_INSTANCE_COUNT, currentInstanceCount)
-    .log("Current instances for %s: %d", workloadName, currentInstanceCount);
+    logger
+        .atInfo()
+        .with(RESOURCE, workloadName)
+        .with(CURRENT_INSTANCE_COUNT, currentInstanceCount)
+        .log("Current instances for %s: %d", workloadName, currentInstanceCount);
 
     int unboundedRecommendation = 0;
     boolean hasValidTrigger = false;
@@ -159,8 +166,10 @@ public class Scaler {
                 workloadName);
         return ScalingStatus.FAILED;
       }
-      logger.atInfo().with(RESOURCE, workloadName)
-      .log("No metrics configured for %s, scaling down to 0", workloadName);
+      logger
+          .atInfo()
+          .with(RESOURCE, workloadName)
+          .log("No metrics configured for %s, scaling down to 0", workloadName);
       updateInstanceCount(0, workloadInfo);
       return ScalingStatus.SUCCEEDED;
     }
@@ -203,9 +212,7 @@ public class Scaler {
       return ScalingStatus.FAILED;
     }
 
-    if (zeroOnlyGithubRunnerWorkerPool
-        && hasGithubRunnerMetric
-        && !hasValidGithubRunnerTrigger) {
+    if (zeroOnlyGithubRunnerWorkerPool && hasGithubRunnerMetric && !hasValidGithubRunnerTrigger) {
       logger
           .atWarning()
           .with(RESOURCE, workloadName)
@@ -274,15 +281,51 @@ public class Scaler {
       newInstanceCount = currentInstanceCount;
     }
 
-    logger.atInfo().with(RESOURCE, workloadName).with(RECOMMENDED_INSTANCE_COUNT, newInstanceCount)
-    .log("Recommended instances for %s: %d", workloadName, newInstanceCount);
+    if (useGithubRunnerZeroOnlyScaleDown
+        && rawRecommendation == 0
+        && newInstanceCount < currentInstanceCount) {
+      CloudRunClientWrapper.WorkerPoolScalingState workerPoolState =
+          cloudRunClientWrapper.getWorkerPoolScalingState(
+              workloadInfo.name(), workloadInfo.projectId(), workloadInfo.location());
+      if (canDecreaseGithubRunnerWorkerPool(currentInstanceCount, workerPoolState)) {
+        newInstanceCount = max(newInstanceCount, currentInstanceCount - 1);
+      } else {
+        logger
+            .atWarning()
+            .with(RESOURCE, workloadName)
+            .log(
+                "Holding %s at %d instances because its worker-pool state is not fully"
+                    + " reconciled: desired=%d, reconciling=%s, generation=%d,"
+                    + " observedGeneration=%d, updateStatus=%s.",
+                workloadName,
+                currentInstanceCount,
+                workerPoolState.manualInstanceCount(),
+                workerPoolState.reconciling(),
+                workerPoolState.generation(),
+                workerPoolState.observedGeneration(),
+                workerPoolState.updateStatus());
+        newInstanceCount = currentInstanceCount;
+      }
+    }
+
+    logger
+        .atInfo()
+        .with(RESOURCE, workloadName)
+        .with(RECOMMENDED_INSTANCE_COUNT, newInstanceCount)
+        .log("Recommended instances for %s: %d", workloadName, newInstanceCount);
     if (newInstanceCount != currentInstanceCount) {
       updateInstanceCount(newInstanceCount, workloadInfo);
-      scalingStabilizer.markScaleEvent(
-          scalerConfig.getBehavior(), now, currentInstanceCount, newInstanceCount);
+      boolean acceptedGithubRunnerDecrease =
+          useGithubRunnerZeroOnlyScaleDown && newInstanceCount < currentInstanceCount;
+      if (!acceptedGithubRunnerDecrease) {
+        scalingStabilizer.markScaleEvent(
+            scalerConfig.getBehavior(), now, currentInstanceCount, newInstanceCount);
+      }
     } else {
-      logger.atInfo().with(RESOURCE, workloadName)
-      .log("Recommended instances for %s is unchanged.", workloadName);
+      logger
+          .atInfo()
+          .with(RESOURCE, workloadName)
+          .log("Recommended instances for %s is unchanged.", workloadName);
     }
 
     if (staticConfig.outputScalerMetrics()) {
@@ -290,6 +333,19 @@ public class Scaler {
     }
 
     return ScalingStatus.SUCCEEDED;
+  }
+
+  private boolean canDecreaseGithubRunnerWorkerPool(
+      int currentInstanceCount, CloudRunClientWrapper.WorkerPoolScalingState workerPoolState) {
+    boolean operationAllowsDecrease =
+        workerPoolState.updateStatus() == CloudRunClientWrapper.WorkerPoolUpdateStatus.NONE
+            || workerPoolState.updateStatus()
+                == CloudRunClientWrapper.WorkerPoolUpdateStatus.COMPLETED_RECONCILED;
+    return operationAllowsDecrease
+        && !workerPoolState.reconciling()
+        && workerPoolState.generation() > 0
+        && workerPoolState.generation() == workerPoolState.observedGeneration()
+        && workerPoolState.manualInstanceCount() == currentInstanceCount;
   }
 
   // Output a recommendation according to stabilization and min and max instances
@@ -316,13 +372,12 @@ public class Scaler {
             scalerConfig.getMaxInstances());
 
     if (newInstanceCount != stabilizedInstanceCount) {
-      logger.atInfo()
+      logger
+          .atInfo()
           .with(RESOURCE, workloadName)
           .with(MIN_REPLICA_COUNT, scalerConfig.getMinInstances())
           .with(MAX_REPLICA_COUNT, scalerConfig.getMaxInstances())
-          .log(
-          "Recommendation for %s was clamped to range",
-          workloadName);
+          .log("Recommendation for %s was clamped to range", workloadName);
     }
 
     return newInstanceCount;
@@ -339,7 +394,9 @@ public class Scaler {
               newInstanceCount,
               workloadInfo.projectId(),
               workloadInfo.location());
-        } catch (ExecutionException | InterruptedException | com.google.api.gax.rpc.ApiException e) {
+        } catch (ExecutionException
+            | InterruptedException
+            | com.google.api.gax.rpc.ApiException e) {
           logger.atWarning().withCause(e).log(
               "Failed to update min instances for %s", workloadInfo.name());
           throw new IOException(e);
