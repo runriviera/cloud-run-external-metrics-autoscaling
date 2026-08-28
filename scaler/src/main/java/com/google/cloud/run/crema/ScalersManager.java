@@ -15,6 +15,23 @@
  *
  */
 
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 package com.google.cloud.run.crema;
 
 import com.google.cloud.run.crema.clients.CloudMonitoringClientWrapper;
@@ -26,6 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,7 +60,7 @@ public final class ScalersManager {
 
   private static final FluentLogger logger = FluentLogger.forEnclosingClass();
 
-  private final Map<String, Scaler> scalers = new HashMap<>();
+  private final Map<String, Scaler> scalers = new ConcurrentHashMap<>();
   private final CloudRunClientWrapper cloudRunClientWrapper;
   private final CloudMonitoringClientWrapper cloudMonitoringClientWrapper;
   private final ExecutorService executorService;
@@ -115,10 +133,24 @@ public final class ScalersManager {
    */
   private Scaler getOrCreateScaler(ScaledObject scaledObject) throws IOException {
     String scaleTargetName = scaledObject.getScaleTargetRef().getName();
-    if (scalers.containsKey(scaleTargetName)) {
-      return scalers.get(scaleTargetName);
+    Scaler existing = scalers.get(scaleTargetName);
+    if (existing != null) {
+      return existing;
     }
 
+    Scaler created = buildScaler(scaledObject);
+    Scaler race = scalers.putIfAbsent(scaleTargetName, created);
+
+    if (race == null) {
+      logger.atInfo().log("Created new scaler for %s", scaleTargetName);
+      return created;
+    }
+
+    return race;
+  }
+
+  private Scaler buildScaler(ScaledObject scaledObject) throws IOException {
+    String scaleTargetName = scaledObject.getScaleTargetRef().getName();
     WorkloadInfoParser.WorkloadInfo workloadInfo = WorkloadInfoParser.parse(scaleTargetName);
     ConfigurationProvider.StaticConfig staticConfig =
         new ConfigurationProvider(new ConfigurationProvider.SystemEnvProvider()).staticConfig();
@@ -126,9 +158,7 @@ public final class ScalersManager {
         new MetricsService(cloudMonitoringClientWrapper, workloadInfo.projectId());
     Scaler scaler =
         new Scaler(cloudRunClientWrapper, metricsService, staticConfig, workloadInfo.projectId());
-
-    scalers.put(scaleTargetName, scaler);
-    logger.atInfo().log("Created new scaler for %s", scaleTargetName);
     return scaler;
   }
+
 }
