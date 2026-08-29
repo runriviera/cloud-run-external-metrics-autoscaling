@@ -57,8 +57,8 @@ import com.google.cloud.run.v2.ServicesClient;
 import com.google.cloud.run.v2.UpdateServiceRequest;
 import com.google.cloud.run.v2.UpdateWorkerPoolRequest;
 import com.google.cloud.run.v2.WorkerPool;
-import com.google.cloud.run.v2.WorkerPoolsClient;
 import com.google.cloud.run.v2.WorkerPoolScaling;
+import com.google.cloud.run.v2.WorkerPoolsClient;
 import com.google.protobuf.Timestamp;
 import java.io.IOException;
 import java.time.Instant;
@@ -127,8 +127,7 @@ public final class CloudRunClientWrapperTest {
         .thenReturn(WorkerPool.newBuilder().build());
 
     assertThat(
-            cloudRunClientWrapper.getWorkerPoolInstanceCount(
-                WORKERPOOL_NAME, PROJECT_ID, REGION))
+            cloudRunClientWrapper.getWorkerPoolInstanceCount(WORKERPOOL_NAME, PROJECT_ID, REGION))
         .isEqualTo(0);
   }
 
@@ -143,16 +142,37 @@ public final class CloudRunClientWrapperTest {
         .thenReturn(workerPool);
 
     assertThat(
-            cloudRunClientWrapper.getWorkerPoolInstanceCount(
-                WORKERPOOL_NAME, PROJECT_ID, REGION))
+            cloudRunClientWrapper.getWorkerPoolInstanceCount(WORKERPOOL_NAME, PROJECT_ID, REGION))
         .isEqualTo(numInstances);
   }
 
   @Test
-  public void updateWorkerPoolManualInstances_succeeds() throws ExecutionException, InterruptedException {
-    WorkerPool workerPool = WorkerPool.newBuilder().build();
-    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class)))
+  public void getWorkerPoolScalingState_returnsReconciliationFields() {
+    WorkerPool workerPool =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setReconciling(true)
+            .setGeneration(4)
+            .setObservedGeneration(3)
+            .build();
+    when(workerPoolsClient.getWorkerPool(getWorkerPoolRequestCaptor.capture()))
         .thenReturn(workerPool);
+
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.manualInstanceCount()).isEqualTo(12);
+    assertThat(state.reconciling()).isTrue();
+    assertThat(state.generation()).isEqualTo(4);
+    assertThat(state.observedGeneration()).isEqualTo(3);
+    assertThat(state.updateStatus()).isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.NONE);
+  }
+
+  @Test
+  public void updateWorkerPoolManualInstances_succeeds()
+      throws ExecutionException, InterruptedException {
+    WorkerPool workerPool = WorkerPool.newBuilder().build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
 
     OperationFuture<WorkerPool, WorkerPool> operationFuture = mockAcceptedOperation();
     when(workerPoolsClient.updateWorkerPoolAsync(updateWorkerPoolRequestCaptor.capture()))
@@ -167,10 +187,89 @@ public final class CloudRunClientWrapperTest {
   }
 
   @Test
+  public void getWorkerPoolScalingState_updateOperationPending_reportsPending()
+      throws ExecutionException, InterruptedException {
+    WorkerPool workerPool =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setGeneration(4)
+            .setObservedGeneration(4)
+            .build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
+
+    OperationFuture<WorkerPool, WorkerPool> operationFuture = mockAcceptedOperation();
+    when(operationFuture.isDone()).thenReturn(false);
+    when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
+        .thenReturn(operationFuture);
+
+    cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, PROJECT_ID, REGION);
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.updateStatus())
+        .isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.PENDING);
+  }
+
+  @Test
+  public void getWorkerPoolScalingState_completedAndReconciled_reportsCompletedReconciled()
+      throws ExecutionException, InterruptedException {
+    WorkerPool beforeUpdate =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setGeneration(4)
+            .setObservedGeneration(4)
+            .build();
+    WorkerPool afterUpdate =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(11))
+            .setGeneration(5)
+            .setObservedGeneration(5)
+            .build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class)))
+        .thenReturn(beforeUpdate, afterUpdate);
+
+    OperationFuture<WorkerPool, WorkerPool> operationFuture = mockAcceptedOperation();
+    when(operationFuture.isDone()).thenReturn(true);
+    when(operationFuture.get()).thenReturn(afterUpdate);
+    when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
+        .thenReturn(operationFuture);
+
+    cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, PROJECT_ID, REGION);
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.updateStatus())
+        .isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.COMPLETED_RECONCILED);
+  }
+
+  @Test
+  public void getWorkerPoolScalingState_completedOperationFailure_reportsFailed()
+      throws ExecutionException, InterruptedException {
+    WorkerPool workerPool =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setGeneration(4)
+            .setObservedGeneration(4)
+            .build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
+
+    OperationFuture<WorkerPool, WorkerPool> operationFuture = mockAcceptedOperation();
+    when(operationFuture.isDone()).thenReturn(true);
+    when(operationFuture.get()).thenThrow(new ExecutionException(new IOException("failed")));
+    when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
+        .thenReturn(operationFuture);
+
+    cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, PROJECT_ID, REGION);
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.updateStatus()).isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.FAILED);
+  }
+
+  @Test
   public void updateWorkerPoolManualInstances_requestRejected_throwsExecutionException() {
     WorkerPool workerPool = WorkerPool.newBuilder().build();
-    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class)))
-        .thenReturn(workerPool);
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
 
     OperationFuture<WorkerPool, WorkerPool> operationFuture = mockRejectedOperation();
     when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
@@ -184,11 +283,35 @@ public final class CloudRunClientWrapperTest {
   }
 
   @Test
+  public void getWorkerPoolScalingState_requestRejected_reportsFailed() {
+    WorkerPool workerPool =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setGeneration(4)
+            .setObservedGeneration(4)
+            .build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
+
+    OperationFuture<WorkerPool, WorkerPool> operationFuture = mockRejectedOperation();
+    when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
+        .thenReturn(operationFuture);
+
+    assertThrows(
+        ExecutionException.class,
+        () ->
+            cloudRunClientWrapper.updateWorkerPoolManualInstances(
+                WORKERPOOL_NAME, 11, PROJECT_ID, REGION));
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.updateStatus()).isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.FAILED);
+  }
+
+  @Test
   public void updateWorkerPoolManualInstances_previousOperationPending_dispatchesAnyway()
       throws ExecutionException, InterruptedException {
     WorkerPool workerPool = WorkerPool.newBuilder().build();
-    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class)))
-        .thenReturn(workerPool);
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class))).thenReturn(workerPool);
 
     OperationFuture<WorkerPool, WorkerPool> operationFuture = mockAcceptedOperation();
     when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
@@ -198,6 +321,48 @@ public final class CloudRunClientWrapperTest {
     cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 20, PROJECT_ID, REGION);
 
     verify(workerPoolsClient, times(2)).updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class));
+  }
+
+  @Test
+  public void getWorkerPoolScalingState_scaleUpDoesNotHidePendingDecrease()
+      throws ExecutionException, InterruptedException {
+    WorkerPool beforeDecrease =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(12))
+            .setGeneration(4)
+            .setObservedGeneration(4)
+            .build();
+    WorkerPool beforeScaleUp =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(11))
+            .setReconciling(true)
+            .setGeneration(5)
+            .setObservedGeneration(4)
+            .build();
+    WorkerPool afterScaleUp =
+        WorkerPool.newBuilder()
+            .setScaling(WorkerPoolScaling.newBuilder().setManualInstanceCount(15))
+            .setGeneration(6)
+            .setObservedGeneration(6)
+            .build();
+    when(workerPoolsClient.getWorkerPool(any(GetWorkerPoolRequest.class)))
+        .thenReturn(beforeDecrease, beforeScaleUp, afterScaleUp);
+
+    OperationFuture<WorkerPool, WorkerPool> decreaseOperation = mockAcceptedOperation();
+    when(decreaseOperation.isDone()).thenReturn(false);
+    OperationFuture<WorkerPool, WorkerPool> scaleUpOperation = mockAcceptedOperation();
+    when(scaleUpOperation.isDone()).thenReturn(true);
+    when(scaleUpOperation.get()).thenReturn(afterScaleUp);
+    when(workerPoolsClient.updateWorkerPoolAsync(any(UpdateWorkerPoolRequest.class)))
+        .thenReturn(decreaseOperation, scaleUpOperation);
+
+    cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, PROJECT_ID, REGION);
+    cloudRunClientWrapper.updateWorkerPoolManualInstances(WORKERPOOL_NAME, 15, PROJECT_ID, REGION);
+    CloudRunClientWrapper.WorkerPoolScalingState state =
+        cloudRunClientWrapper.getWorkerPoolScalingState(WORKERPOOL_NAME, PROJECT_ID, REGION);
+
+    assertThat(state.updateStatus())
+        .isEqualTo(CloudRunClientWrapper.WorkerPoolUpdateStatus.PENDING);
   }
 
   @Test
@@ -248,8 +413,7 @@ public final class CloudRunClientWrapperTest {
   @Test
   public void getServiceInstanceCount_withNoScalingConfigured_returnsZero() {
     Service service = Service.newBuilder().build();
-    when(servicesClient.getService(getServiceRequestCaptor.capture()))
-        .thenReturn(service);
+    when(servicesClient.getService(getServiceRequestCaptor.capture())).thenReturn(service);
 
     assertThat(cloudRunClientWrapper.getServiceInstanceCount(SERVICE_NAME, PROJECT_ID, REGION))
         .isEqualTo(0);
@@ -319,7 +483,10 @@ public final class CloudRunClientWrapperTest {
         Service.newBuilder()
             .setTemplate(
                 RevisionTemplate.newBuilder()
-                    .setScaling(RevisionScaling.newBuilder().setMinInstanceCount(5).setMaxInstanceCount(222)))
+                    .setScaling(
+                        RevisionScaling.newBuilder()
+                            .setMinInstanceCount(5)
+                            .setMaxInstanceCount(222)))
             .build();
     when(servicesClient.getService(any(GetServiceRequest.class))).thenReturn(service);
 
@@ -347,11 +514,13 @@ public final class CloudRunClientWrapperTest {
 
     assertThrows(
         ExecutionException.class,
-        () -> cloudRunClientWrapper.updateServiceMinInstances(SERVICE_NAME, 10, PROJECT_ID, REGION));
+        () ->
+            cloudRunClientWrapper.updateServiceMinInstances(SERVICE_NAME, 10, PROJECT_ID, REGION));
   }
 
   @Test
-  public void updateServiceManualInstances_succeeds() throws ExecutionException, InterruptedException {
+  public void updateServiceManualInstances_succeeds()
+      throws ExecutionException, InterruptedException {
     Service service =
         Service.newBuilder()
             .setScaling(ServiceScaling.newBuilder().setManualInstanceCount(5))

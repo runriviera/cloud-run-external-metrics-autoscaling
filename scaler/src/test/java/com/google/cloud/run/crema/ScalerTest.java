@@ -94,11 +94,14 @@ public final class ScalerTest {
 
   private static final String SERVICE_NAME = "test-service";
   private static final String WORKERPOOL_NAME = "test-workerpool";
+  private static final String SECOND_WORKERPOOL_NAME = "second-workerpool";
   private static final String PROJECT_ID = "test-project";
   private static final String SERVICE_WORKLOAD_NAME =
       "projects/test-project/locations/test-location/services/test-service";
   private static final String WORKERPOOL_WORKLOAD_NAME =
       "projects/test-project/locations/test-location/workerpools/test-workerpool";
+  private static final String SECOND_WORKERPOOL_WORKLOAD_NAME =
+      "projects/test-project/locations/test-location/workerpools/second-workerpool";
 
   private static final ConfigurationProvider.StaticConfig MANUAL_SCALING_STATIC_CONFIG =
       new ConfigurationProvider.StaticConfig(
@@ -147,6 +150,31 @@ public final class ScalerTest {
                               Advanced.ScalerConfig.Behavior.Scaling.newBuilder()
                                   .setStabilizationWindowSeconds(180))))
           .build();
+
+  private static CloudRunClientWrapper.WorkerPoolScalingState reconciledWorkerPoolState(
+      int manualInstanceCount) {
+    return new CloudRunClientWrapper.WorkerPoolScalingState(
+        manualInstanceCount, false, 1, 1, CloudRunClientWrapper.WorkerPoolUpdateStatus.NONE);
+  }
+
+  private static ScaledObjectMetrics githubRunnerMetrics(
+      String workloadName, Advanced advanced, double value) {
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(ScaleTargetRef.newBuilder().setName(workloadName).build())
+            .setAdvanced(advanced)
+            .build();
+    Metric metric =
+        Metric.newBuilder()
+            .setValue(value)
+            .setTargetAverageValue(1)
+            .setTriggerType("github-runner")
+            .build();
+    return ScaledObjectMetrics.newBuilder()
+        .setScaledObject(scaledObject)
+        .addMetrics(metric)
+        .build();
+  }
 
   @Before
   public void setUp() {
@@ -347,6 +375,9 @@ public final class ScalerTest {
     when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
             WORKERPOOL_NAME, "test-project", "test-location"))
         .thenReturn(15);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(15));
 
     ScalingStatus status = scaler.scale(scaledObjectMetrics);
 
@@ -394,7 +425,7 @@ public final class ScalerTest {
   }
 
   @Test
-  public void scale_githubRunnerWorkerPoolZeroRecommendationEnabled_scalesToZero()
+  public void scale_githubRunnerWorkerPoolZeroRecommendationEnabled_decrementsOneInstance()
       throws IOException, ExecutionException, InterruptedException {
     Scaler scaler =
         new Scaler(
@@ -419,12 +450,216 @@ public final class ScalerTest {
     when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
             WORKERPOOL_NAME, "test-project", "test-location"))
         .thenReturn(15);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(15));
 
     ScalingStatus status = scaler.scale(scaledObjectMetrics);
 
     assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
     verify(cloudRunClientWrapper)
-        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 14, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolZeroRecommendation_decrementsOneInstance()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    Advanced advanced =
+        ADVANCED.toBuilder()
+            .setScalerConfig(ADVANCED.getScalerConfig().toBuilder().setMinInstances(6))
+            .build();
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(advanced)
+            .build();
+    Metric metric =
+        Metric.newBuilder()
+            .setValue(0)
+            .setTargetAverageValue(1)
+            .setTriggerType("github-runner")
+            .build();
+    ScaledObjectMetrics scaledObjectMetrics =
+        ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).addMetrics(metric).build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(12);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(12));
+
+    ScalingStatus status = scaler.scale(scaledObjectMetrics);
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolZeroRecommendationAboveFloor_decrementsOneInstance()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    Advanced advanced =
+        ADVANCED.toBuilder()
+            .setScalerConfig(ADVANCED.getScalerConfig().toBuilder().setMinInstances(1))
+            .build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(3);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(3));
+
+    ScalingStatus status = scaler.scale(githubRunnerMetrics(WORKERPOOL_WORKLOAD_NAME, advanced, 0));
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 2, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolReconciling_doesNotDecreaseAgain()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    Advanced advanced =
+        ADVANCED.toBuilder()
+            .setScalerConfig(ADVANCED.getScalerConfig().toBuilder().setMinInstances(6))
+            .build();
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(advanced)
+            .build();
+    Metric metric =
+        Metric.newBuilder()
+            .setValue(0)
+            .setTargetAverageValue(1)
+            .setTriggerType("github-runner")
+            .build();
+    ScaledObjectMetrics scaledObjectMetrics =
+        ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).addMetrics(metric).build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(12);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(
+            new CloudRunClientWrapper.WorkerPoolScalingState(
+                11, true, 5, 4, CloudRunClientWrapper.WorkerPoolUpdateStatus.PENDING));
+
+    ScalingStatus status = scaler.scale(scaledObjectMetrics);
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolGenerationLagged_doesNotDecrease()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(12);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(
+            new CloudRunClientWrapper.WorkerPoolScalingState(
+                12, false, 5, 4, CloudRunClientWrapper.WorkerPoolUpdateStatus.NONE));
+
+    ScalingStatus status = scaler.scale(githubRunnerMetrics(WORKERPOOL_WORKLOAD_NAME, ADVANCED, 0));
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolFailedOperation_doesNotDecrease()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(12);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(
+            new CloudRunClientWrapper.WorkerPoolScalingState(
+                12, false, 4, 4, CloudRunClientWrapper.WorkerPoolUpdateStatus.FAILED));
+
+    ScalingStatus status = scaler.scale(githubRunnerMetrics(WORKERPOOL_WORKLOAD_NAME, ADVANCED, 0));
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(anyString(), anyInt(), anyString(), anyString());
+  }
+
+  @Test
+  public void scale_reconcilingWorkerPool_doesNotBlockAnotherWorkerPool()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    Advanced advanced =
+        ADVANCED.toBuilder()
+            .setScalerConfig(ADVANCED.getScalerConfig().toBuilder().setMinInstances(1))
+            .build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(12);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(
+            new CloudRunClientWrapper.WorkerPoolScalingState(
+                11, true, 5, 4, CloudRunClientWrapper.WorkerPoolUpdateStatus.PENDING));
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            SECOND_WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(3);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            SECOND_WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(3));
+
+    assertThat(scaler.scale(githubRunnerMetrics(WORKERPOOL_WORKLOAD_NAME, advanced, 0)))
+        .isEqualTo(ScalingStatus.SUCCEEDED);
+    assertThat(scaler.scale(githubRunnerMetrics(SECOND_WORKERPOOL_WORKLOAD_NAME, advanced, 0)))
+        .isEqualTo(ScalingStatus.SUCCEEDED);
+
+    verify(cloudRunClientWrapper, never())
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 11, "test-project", "test-location");
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(
+            SECOND_WORKERPOOL_NAME, 2, "test-project", "test-location");
   }
 
   @Test
@@ -459,6 +694,29 @@ public final class ScalerTest {
     assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
     verify(cloudRunClientWrapper)
         .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 10, "test-project", "test-location");
+  }
+
+  @Test
+  public void scale_githubRunnerWorkerPoolIncreaseToTwelve_scalesUpImmediately()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper,
+            metricsService,
+            ZERO_ONLY_GITHUB_RUNNER_STATIC_CONFIG,
+            "test-project");
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(6);
+
+    ScalingStatus status =
+        scaler.scale(githubRunnerMetrics(WORKERPOOL_WORKLOAD_NAME, ADVANCED, 12));
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 12, "test-project", "test-location");
+    verify(cloudRunClientWrapper, never())
+        .getWorkerPoolScalingState(anyString(), anyString(), anyString());
   }
 
   @Test
@@ -515,8 +773,7 @@ public final class ScalerTest {
         .thenReturn(15);
 
     ScalingStatus status =
-        scaler.scale(
-            ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).build());
+        scaler.scale(ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).build());
 
     assertThat(status).isEqualTo(ScalingStatus.FAILED);
     verify(cloudRunClientWrapper, never())
@@ -553,6 +810,9 @@ public final class ScalerTest {
     when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
             WORKERPOOL_NAME, "test-project", "test-location"))
         .thenReturn(15);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(15));
 
     assertThat(scaler.scale(metrics)).isEqualTo(ScalingStatus.SUCCEEDED);
     verify(cloudRunClientWrapper, never())
@@ -561,7 +821,7 @@ public final class ScalerTest {
     clock.advance(Duration.ofSeconds(180));
     assertThat(scaler.scale(metrics)).isEqualTo(ScalingStatus.SUCCEEDED);
     verify(cloudRunClientWrapper)
-        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 0, "test-project", "test-location");
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 14, "test-project", "test-location");
   }
 
   @Test
@@ -592,8 +852,7 @@ public final class ScalerTest {
                     .build())
             .build();
     ScaledObjectMetrics zeroMetrics =
-        activeMetrics
-            .toBuilder()
+        activeMetrics.toBuilder()
             .clearMetrics()
             .addMetrics(
                 Metric.newBuilder()
@@ -605,6 +864,9 @@ public final class ScalerTest {
     when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
             WORKERPOOL_NAME, "test-project", "test-location"))
         .thenReturn(0, 1, 1);
+    when(cloudRunClientWrapper.getWorkerPoolScalingState(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(reconciledWorkerPoolState(1));
 
     assertThat(scaler.scale(activeMetrics)).isEqualTo(ScalingStatus.SUCCEEDED);
     verify(cloudRunClientWrapper)
@@ -882,6 +1144,7 @@ public final class ScalerTest {
     verify(cloudRunClientWrapper)
         .updateServiceMinInstances(SERVICE_NAME, 10, "test-project", "test-location");
   }
+
   @Test
   public void scale_withServiceApiException_throwsIOException()
       throws IOException, ExecutionException, InterruptedException {
@@ -904,8 +1167,7 @@ public final class ScalerTest {
         .when(cloudRunClientWrapper)
         .updateServiceManualInstances(anyString(), anyInt(), anyString(), anyString());
 
-    IOException thrown =
-        assertThrows(IOException.class, () -> scaler.scale(scaledObjectMetrics));
+    IOException thrown = assertThrows(IOException.class, () -> scaler.scale(scaledObjectMetrics));
 
     assertThat(thrown.getCause()).isInstanceOf(com.google.api.gax.rpc.ApiException.class);
   }
