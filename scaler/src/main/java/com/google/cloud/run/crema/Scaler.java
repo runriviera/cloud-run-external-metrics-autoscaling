@@ -281,33 +281,6 @@ public class Scaler {
       newInstanceCount = currentInstanceCount;
     }
 
-    if (useGithubRunnerZeroOnlyScaleDown
-        && rawRecommendation == 0
-        && newInstanceCount < currentInstanceCount) {
-      CloudRunClientWrapper.WorkerPoolScalingState workerPoolState =
-          cloudRunClientWrapper.getWorkerPoolScalingState(
-              workloadInfo.name(), workloadInfo.projectId(), workloadInfo.location());
-      if (canDecreaseGithubRunnerWorkerPool(currentInstanceCount, workerPoolState)) {
-        newInstanceCount = max(newInstanceCount, currentInstanceCount - 1);
-      } else {
-        logger
-            .atWarning()
-            .with(RESOURCE, workloadName)
-            .log(
-                "Holding %s at %d instances because its worker-pool state is not fully"
-                    + " reconciled: desired=%d, reconciling=%s, generation=%d,"
-                    + " observedGeneration=%d, updateStatus=%s.",
-                workloadName,
-                currentInstanceCount,
-                workerPoolState.manualInstanceCount(),
-                workerPoolState.reconciling(),
-                workerPoolState.generation(),
-                workerPoolState.observedGeneration(),
-                workerPoolState.updateStatus());
-        newInstanceCount = currentInstanceCount;
-      }
-    }
-
     logger
         .atInfo()
         .with(RESOURCE, workloadName)
@@ -315,12 +288,8 @@ public class Scaler {
         .log("Recommended instances for %s: %d", workloadName, newInstanceCount);
     if (newInstanceCount != currentInstanceCount) {
       updateInstanceCount(newInstanceCount, workloadInfo);
-      boolean acceptedGithubRunnerDecrease =
-          useGithubRunnerZeroOnlyScaleDown && newInstanceCount < currentInstanceCount;
-      if (!acceptedGithubRunnerDecrease) {
-        scalingStabilizer.markScaleEvent(
-            scalerConfig.getBehavior(), now, currentInstanceCount, newInstanceCount);
-      }
+      scalingStabilizer.markScaleEvent(
+          scalerConfig.getBehavior(), now, currentInstanceCount, newInstanceCount);
     } else {
       logger
           .atInfo()
@@ -333,19 +302,6 @@ public class Scaler {
     }
 
     return ScalingStatus.SUCCEEDED;
-  }
-
-  private boolean canDecreaseGithubRunnerWorkerPool(
-      int currentInstanceCount, CloudRunClientWrapper.WorkerPoolScalingState workerPoolState) {
-    boolean operationAllowsDecrease =
-        workerPoolState.updateStatus() == CloudRunClientWrapper.WorkerPoolUpdateStatus.NONE
-            || workerPoolState.updateStatus()
-                == CloudRunClientWrapper.WorkerPoolUpdateStatus.COMPLETED_RECONCILED;
-    return operationAllowsDecrease
-        && !workerPoolState.reconciling()
-        && workerPoolState.generation() > 0
-        && workerPoolState.generation() == workerPoolState.observedGeneration()
-        && workerPoolState.manualInstanceCount() == currentInstanceCount;
   }
 
   // Output a recommendation according to stabilization and min and max instances
