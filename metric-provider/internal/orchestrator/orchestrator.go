@@ -151,9 +151,8 @@ func (o *Orchestrator) refreshMetricsForScaledObject(
 	}
 
 	return &pb.ScaledObjectMetrics{
-		ScaledObject:       scaling.ToPbScaledObject(kedaScaledObject.Spec),
-		Metrics:            toMetrics(scaledObjectState),
-		FailedTriggerTypes: scaledObjectState.FailedTriggerTypes,
+		ScaledObject: scaling.ToPbScaledObject(kedaScaledObject.Spec),
+		Metrics:      toMetrics(scaledObjectState),
 	}, nil
 }
 

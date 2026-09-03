@@ -50,7 +50,6 @@ type StateProvider struct {
 // A scaled object's state according to the state of all its scalers
 type ScaledObjectState struct {
 	MetricAndTargetValues []MetricAndTargetValue
-	FailedTriggerTypes    []string
 	IsActive              bool // True if any scalers are active
 }
 
@@ -65,7 +64,6 @@ type scalerState struct {
 // Wrap state and error in a single struct for channel compatibility
 type scalerChanResult struct {
 	triggerIndex int
-	triggerType  string
 	scalerState  scalerState
 	err          error
 }
@@ -107,12 +105,10 @@ func (sp *StateProvider) GetScaledObjectState(ctx context.Context, scaledObject 
 
 	isAnyScalerActive := false
 	var metricAndTargetValues []MetricAndTargetValue
-	var failedTriggerTypes []string
 
 	for result := range resultsChan {
 		if result.err != nil {
 			logger.Error(result.err, "failed to read metrics", "triggerIndex", result.triggerIndex)
-			failedTriggerTypes = append(failedTriggerTypes, result.triggerType)
 			continue
 		} else {
 			scalerState := result.scalerState
@@ -124,12 +120,11 @@ func (sp *StateProvider) GetScaledObjectState(ctx context.Context, scaledObject 
 	}
 
 	if len(metricAndTargetValues) == 0 {
-		return ScaledObjectState{FailedTriggerTypes: failedTriggerTypes}, fmt.Errorf("failed to retrieve any metrics for scaling")
+		return ScaledObjectState{}, fmt.Errorf("failed to retrieve any metrics for scaling")
 	}
 
 	state := ScaledObjectState{
 		MetricAndTargetValues: metricAndTargetValues,
-		FailedTriggerTypes:    failedTriggerTypes,
 		IsActive:              isAnyScalerActive,
 	}
 
@@ -149,7 +144,6 @@ func getScalerState(ctx context.Context, scaler scalers.Scaler, config scalersco
 	if len(metricSpecs) == 0 {
 		return scalerChanResult{
 			triggerIndex: triggerIndex,
-			triggerType:  triggerType,
 			err:          fmt.Errorf("scaler returned no metric specs"),
 		}
 	}
@@ -196,7 +190,6 @@ func getScalerState(ctx context.Context, scaler scalers.Scaler, config scalersco
 
 	return scalerChanResult{
 		triggerIndex: triggerIndex,
-		triggerType:  triggerType,
 		scalerState: scalerState{
 			isActive:             isActive,
 			metricAndTargetValue: metricAndTargetValue,

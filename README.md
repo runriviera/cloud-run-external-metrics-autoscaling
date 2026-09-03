@@ -197,7 +197,6 @@ The following environment variables are checked by the container:
 - `OUTPUT_SCALER_METRICS`: Optional. If true, CREMA will emit metrics to Cloud Monitoring.
 - `ENABLE_CLOUD_LOGGING`: Optional. If true, CREMA will log errors to Cloud Logging for improved log searchability.
 - `LOG_FORMAT`: Optional. If set to `json`, CREMA will output JSON-structured payloads natively instead of legacy plain-text logs.
-- `GITHUB_RUNNER_ZERO_ONLY_SCALE_DOWN`: Optional. If true, worker pools using a `github-runner` trigger can scale up normally but only scale down when the recommendation reaches zero. When metrics are missing, CREMA preserves the current worker-pool size. This Riviera extension avoids terminating busy GitHub runners during partial scale-down. It is disabled by default and does not affect services or other trigger types.
 
 Note: The `OUTPUT_SCALER_METRICS` and `ENABLE_CLOUD_LOGGING` flags are disabled by default as these may incur additional costs. See [Cloud Observability Pricing](https://cloud.google.com/products/observability/pricing) for details.
 
