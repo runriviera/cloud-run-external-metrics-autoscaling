@@ -58,11 +58,6 @@ import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 
 /** Thin wrapper around Cloud Run API */
@@ -73,69 +68,6 @@ public class CloudRunClientWrapper {
 
   private final ServicesClient servicesClient;
   private final WorkerPoolsClient workerPoolsClient;
-  private final Map<String, WorkerPoolUpdateTracker> workerPoolUpdates = new ConcurrentHashMap<>();
-  private final Set<String> failedWorkerPoolUpdates = ConcurrentHashMap.newKeySet();
-
-  private record TrackedWorkerPoolUpdate(
-      OperationFuture<WorkerPool, WorkerPool> operation,
-      int requestedInstances,
-      long previousGeneration) {}
-
-  private static final class WorkerPoolUpdateTracker {
-    private final List<TrackedWorkerPoolUpdate> updates = new ArrayList<>();
-
-    synchronized void add(TrackedWorkerPoolUpdate update) {
-      updates.add(update);
-    }
-
-    synchronized WorkerPoolUpdateStatus getStatus(WorkerPool workerPool, int manualInstanceCount) {
-      if (updates.isEmpty()) {
-        return WorkerPoolUpdateStatus.NONE;
-      }
-
-      for (TrackedWorkerPoolUpdate update : updates) {
-        if (!update.operation().isDone()) {
-          return WorkerPoolUpdateStatus.PENDING;
-        }
-        try {
-          update.operation().get();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          return WorkerPoolUpdateStatus.FAILED;
-        } catch (ExecutionException | RuntimeException e) {
-          return WorkerPoolUpdateStatus.FAILED;
-        }
-      }
-
-      TrackedWorkerPoolUpdate latestUpdate = updates.getLast();
-      boolean reconciled =
-          !workerPool.getReconciling()
-              && workerPool.getGeneration() > latestUpdate.previousGeneration()
-              && workerPool.getGeneration() == workerPool.getObservedGeneration()
-              && manualInstanceCount == latestUpdate.requestedInstances();
-      if (!reconciled) {
-        return WorkerPoolUpdateStatus.COMPLETED_PENDING_RECONCILIATION;
-      }
-
-      updates.clear();
-      return WorkerPoolUpdateStatus.COMPLETED_RECONCILED;
-    }
-  }
-
-  public enum WorkerPoolUpdateStatus {
-    NONE,
-    PENDING,
-    COMPLETED_PENDING_RECONCILIATION,
-    COMPLETED_RECONCILED,
-    FAILED
-  }
-
-  public record WorkerPoolScalingState(
-      int manualInstanceCount,
-      boolean reconciling,
-      long generation,
-      long observedGeneration,
-      WorkerPoolUpdateStatus updateStatus) {}
 
   public CloudRunClientWrapper() throws IOException {
     this.servicesClient = ServicesClient.create();
@@ -162,28 +94,6 @@ public class CloudRunClientWrapper {
       return workerpool.getScaling().getManualInstanceCount();
     }
     return 0;
-  }
-
-  /** Returns the desired scaling and reconciliation state for a worker pool. */
-  public WorkerPoolScalingState getWorkerPoolScalingState(
-      String workerpoolName, String projectId, String region) {
-    String resourceName = WorkerPoolName.of(projectId, region, workerpoolName).toString();
-    WorkerPool workerPool = getWorkerPool(workerpoolName, projectId, region);
-    int manualInstanceCount =
-        workerPool.hasScaling() ? workerPool.getScaling().getManualInstanceCount() : 0;
-    WorkerPoolUpdateTracker updateTracker = workerPoolUpdates.get(resourceName);
-    WorkerPoolUpdateStatus updateStatus =
-        failedWorkerPoolUpdates.contains(resourceName)
-            ? WorkerPoolUpdateStatus.FAILED
-            : updateTracker == null
-                ? WorkerPoolUpdateStatus.NONE
-                : updateTracker.getStatus(workerPool, manualInstanceCount);
-    return new WorkerPoolScalingState(
-        manualInstanceCount,
-        workerPool.getReconciling(),
-        workerPool.getGeneration(),
-        workerPool.getObservedGeneration(),
-        updateStatus);
   }
 
   /**
@@ -236,15 +146,7 @@ public class CloudRunClientWrapper {
     OperationFuture<WorkerPool, WorkerPool> operation =
         workerPoolsClient.updateWorkerPoolAsync(updateRequest);
     logCompletionAsync(resourceName, operation);
-    try {
-      operation.getInitialFuture().get(); // Wait for acceptance only, not completion
-    } catch (ExecutionException | InterruptedException e) {
-      failedWorkerPoolUpdates.add(resourceName);
-      throw e;
-    }
-    workerPoolUpdates
-        .computeIfAbsent(resourceName, unused -> new WorkerPoolUpdateTracker())
-        .add(new TrackedWorkerPoolUpdate(operation, instances, currentWorkerPool.getGeneration()));
+    operation.getInitialFuture().get(); // Wait for acceptance only, not completion
   }
 
   /**
