@@ -63,6 +63,9 @@ message ScaleResponse {
 }
 
 message ScaledObjectMetrics {
+  reserved 3;
+  reserved "failed_trigger_types";
+
   // The scaled object.
   ScaledObject scaled_object = 1;
 

@@ -267,6 +267,37 @@ public final class ScalerTest {
   }
 
   @Test
+  public void scale_githubRunnerMetricPartiallyDecreasesWorkerPoolManualInstanceCount()
+      throws IOException, ExecutionException, InterruptedException {
+    Scaler scaler =
+        new Scaler(
+            cloudRunClientWrapper, metricsService, MANUAL_SCALING_STATIC_CONFIG, "test-project");
+    ScaledObject scaledObject =
+        ScaledObject.newBuilder()
+            .setScaleTargetRef(
+                ScaleTargetRef.newBuilder().setName(WORKERPOOL_WORKLOAD_NAME).build())
+            .setAdvanced(ADVANCED)
+            .build();
+    Metric metric =
+        Metric.newBuilder()
+            .setValue(8)
+            .setTargetAverageValue(1)
+            .setTriggerType("github-runner")
+            .build();
+    ScaledObjectMetrics scaledObjectMetrics =
+        ScaledObjectMetrics.newBuilder().setScaledObject(scaledObject).addMetrics(metric).build();
+    when(cloudRunClientWrapper.getWorkerPoolInstanceCount(
+            WORKERPOOL_NAME, "test-project", "test-location"))
+        .thenReturn(15);
+
+    ScalingStatus status = scaler.scale(scaledObjectMetrics);
+
+    assertThat(status).isEqualTo(ScalingStatus.SUCCEEDED);
+    verify(cloudRunClientWrapper)
+        .updateWorkerPoolManualInstances(WORKERPOOL_NAME, 8, "test-project", "test-location");
+  }
+
+  @Test
   public void scale_toIncreaseInstances_updatesServiceMinInstanceCount()
       throws IOException, ExecutionException, InterruptedException {
     Scaler scaler =
