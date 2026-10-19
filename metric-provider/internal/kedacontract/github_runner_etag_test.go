@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,4 +185,70 @@ func TestGitHubRunnerWorkflowRunMaxAgeSkipsOnlyStaleQueuedRuns(t *testing.T) {
 	require.False(t, requestedJobRuns["100"], "stale queued run should not trigger a jobs request")
 	require.True(t, requestedJobRuns["200"])
 	require.True(t, requestedJobRuns["300"], "old in-progress run must remain visible")
+}
+
+func TestGitHubRunnerCountsJobsBeyondFirstHundredAndRevalidatesLaterPages(t *testing.T) {
+	const runnerLabel = "gcp-ci-test-cloud-run"
+	var phase atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/repos/runriviera/os/actions/runs" {
+			runs := []map[string]any{}
+			if r.URL.Query().Get("status") == "queued" {
+				runs = append(runs, map[string]any{"id": 400, "status": "queued", "repository": map[string]any{"name": "os"}})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "workflow_runs": runs})
+			return
+		}
+		if r.URL.Path != "/repos/runriviera/os/actions/runs/400/jobs" {
+			http.NotFound(w, r)
+			return
+		}
+		var page, pageSize int
+		_, _ = fmt.Sscan(r.URL.Query().Get("page"), &page)
+		_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &pageSize)
+		if page == 0 {
+			page = 1
+		}
+		if pageSize <= 0 {
+			pageSize = 30
+		}
+		etag := fmt.Sprintf("\"jobs-%d\"", page)
+		if phase.Load() > 0 && (page-1)*pageSize+pageSize >= 116 {
+			etag = fmt.Sprintf("\"jobs-%d-completed\"", page)
+		}
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		jobs := []map[string]any{}
+		for id := (page-1)*pageSize + 1; id <= min(page*pageSize, 116); id++ {
+			status := "completed"
+			if id == 116 && phase.Load() == 0 {
+				status = "queued"
+			}
+			jobs = append(jobs, map[string]any{"id": id, "run_id": 400, "status": status, "labels": []string{runnerLabel}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 116, "jobs": jobs})
+	}))
+	defer server.Close()
+	scaler, err := scalers.NewGitHubRunnerScaler(&scalersconfig.ScalerConfig{
+		TriggerMetadata: map[string]string{
+			"githubApiURL": server.URL, "runnerScope": "repo", "owner": "runriviera", "repos": "os",
+			"labels": runnerLabel, "enableEtags": "true", "targetWorkflowQueueLength": "1",
+		},
+		AuthParams: map[string]string{"personalAccessToken": "test-token"}, GlobalHTTPTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, scaler.Close(context.Background())) }()
+	readDemand := func() float64 {
+		metrics, _, err := scaler.GetMetricsAndActivity(context.Background(), "github-runner-queue")
+		require.NoError(t, err)
+		require.Len(t, metrics, 1)
+		return metrics[0].Value.AsApproximateFloat64()
+	}
+	require.Equal(t, 1.0, readDemand(), "job 116 must contribute to runner demand")
+	phase.Store(1)
+	require.Equal(t, 0.0, readDemand(), "an unchanged first page must not hide later-page changes")
 }

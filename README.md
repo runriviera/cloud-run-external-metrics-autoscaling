@@ -260,6 +260,24 @@ TIP: Use the following Cloud Logging queries for filtering structured logs:
 
 ## Optional: Build the container image from source
 
+For releases restricted to `metric-provider`, the Riviera fork also provides
+`Dockerfile.metric-provider`. It rebuilds and tests the Go provider with a pinned
+Go toolchain, then replaces only that binary in the immutable deployed CREMA
+image. A source checksum rejects changes to the inherited Java scaler, protocol,
+build configuration, or entrypoint; those changes require the full `Dockerfile`
+build instead. The unchanged runtime and Java scaler are inherited from source
+`0ee8500ba0d4a2d53030e5af25a874ce58756c78`.
+
+```bash
+docker build --platform linux/amd64 -f Dockerfile.metric-provider -t crema:github-pagination .
+```
+
+The pinned KEDA fork fetches workflow jobs in complete 30-job pages. It validates
+every page on each poll, including later pages when the first page returns 304.
+A failed, malformed, changing, or incomplete page rejects that demand snapshot;
+it never substitutes zero or publishes a partial job list. Workflow-run discovery
+retains its existing separate 100-run limit.
+
 Follow the steps below to build the CREMA container image yourself. The resulting container image will be pushed to Artifact Registry. Note that this build typically takes 30+ minutes.
 
 Create an Artifact Registry repository to store the CREMA container image if you don't already have one:
