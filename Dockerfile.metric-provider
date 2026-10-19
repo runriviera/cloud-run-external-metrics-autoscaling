@@ -3,6 +3,11 @@
 # inherited from the reviewed base. Use Dockerfile for Java or protocol changes.
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS source_check
 
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" != amd64 ]; then \
+        printf '%s\n' 'The inherited CREMA runtime requires --platform linux/amd64.' >&2; exit 1; \
+    fi
+
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
