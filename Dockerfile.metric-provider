@@ -1,0 +1,40 @@
+# Rebuild only the Go metric provider on the immutable deployed CREMA image.
+# The Java scaler, entrypoint, and runtime configuration stay byte-for-byte
+# inherited from the reviewed base. Use Dockerfile for Java or protocol changes.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS source_check
+
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" != amd64 ]; then \
+        printf '%s\n' 'The inherited CREMA runtime requires --platform linux/amd64.' >&2; exit 1; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
+    && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+
+WORKDIR /src
+COPY proto ./proto
+COPY scaler ./scaler
+COPY entrypoint.sh ./entrypoint.sh
+COPY Dockerfile ./Dockerfile
+# The inherited Java image was built from source 0ee8500. Refuse this shortcut
+# if any Java, protocol, build configuration, or entrypoint input changes.
+RUN actual=$( { find scaler proto -type f -print0 | sort -z | xargs -0 sha256sum; sha256sum entrypoint.sh Dockerfile; } | sha256sum | cut -d' ' -f1) \
+    && if [ "$actual" != 56a4d75fe2936d223e6c90a8cf9cc9dfe32b5de81d6cbd980d68d7ed9e6e22a0 ]; then \
+        printf '%s\n' 'Inherited CREMA source changed; use the full Dockerfile build.' >&2; exit 1; \
+    fi
+
+FROM source_check AS builder
+COPY metric-provider ./metric-provider
+RUN protoc --proto_path=. --proto_path=/usr/include --go_out=. --go-grpc_out=. proto/*.proto
+
+WORKDIR /src/metric-provider
+ENV GOTOOLCHAIN=local GOMAXPROCS=4
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build go test ./...
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -ldflags='-w -s' -o /out/metric-provider .
+
+FROM us-central1-docker.pkg.dev/riviera-ci-runners/github-runners/crema@sha256:984cb03aa767ee286d08ed60fd56b406f1594f3686fa8b866fe134171105590a
+COPY --from=builder /out/metric-provider /app/metric-provider
