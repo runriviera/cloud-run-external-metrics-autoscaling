@@ -274,9 +274,13 @@ docker build --platform linux/amd64 -f Dockerfile.metric-provider -t crema:githu
 
 The pinned KEDA fork fetches workflow jobs in complete 30-job pages. It validates
 every page on each poll, including later pages when the first page returns 304.
-A failed, malformed, changing, or incomplete page rejects that demand snapshot;
-it never substitutes zero or publishes a partial job list. Workflow-run discovery
-retains its existing separate 100-run limit.
+If otherwise valid pages report a changing job count, it restarts that run's
+entire scan once. Both attempts share one 30-second deadline, shortened by an
+earlier caller deadline. Malformed or incomplete pages fail immediately. Exhausted
+snapshot churn returns no demand metric; it never substitutes zero, cached demand,
+or a partial job list. Page bodies and ETags replace the last complete cache only
+after a successful scan. Workflow-run discovery retains its existing separate
+100-run limit.
 
 Follow the steps below to build the CREMA container image yourself. The resulting container image will be pushed to Artifact Registry. Note that this build typically takes 30+ minutes.
 

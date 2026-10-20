@@ -30,6 +30,7 @@ package scaling
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -108,7 +109,11 @@ func (sp *StateProvider) GetScaledObjectState(ctx context.Context, scaledObject 
 
 	for result := range resultsChan {
 		if result.err != nil {
-			logger.Error(result.err, "failed to read metrics", "triggerIndex", result.triggerIndex)
+			if errors.Is(result.err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+				logger.Info("Metrics read canceled by caller", "triggerIndex", result.triggerIndex, "cause", result.err.Error())
+			} else {
+				logger.Error(result.err, "failed to read metrics", "triggerIndex", result.triggerIndex)
+			}
 			continue
 		} else {
 			scalerState := result.scalerState
